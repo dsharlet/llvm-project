@@ -1539,7 +1539,6 @@ Process::GetBreakpointSiteList() const {
 
 void Process::DisableAllBreakpointSites() {
   m_breakpoint_site_list.ForEach([this](BreakpointSite *bp_site) -> void {
-    //        bp_site->SetEnabled(true);
     DisableBreakpointSite(bp_site);
   });
 }
@@ -1557,7 +1556,7 @@ Status Process::DisableBreakpointSiteByID(lldb::user_id_t break_id) {
   Status error;
   BreakpointSiteSP bp_site_sp = m_breakpoint_site_list.FindByID(break_id);
   if (bp_site_sp) {
-    if (bp_site_sp->IsEnabled())
+    if (IsBreakpointSiteEnabled(bp_site_sp))
       error = DisableBreakpointSite(bp_site_sp.get());
   } else {
     error = Status::FromErrorStringWithFormat(
@@ -1571,13 +1570,23 @@ Status Process::EnableBreakpointSiteByID(lldb::user_id_t break_id) {
   Status error;
   BreakpointSiteSP bp_site_sp = m_breakpoint_site_list.FindByID(break_id);
   if (bp_site_sp) {
-    if (!bp_site_sp->IsEnabled())
+    if (!IsBreakpointSiteEnabled(bp_site_sp))
       error = EnableBreakpointSite(bp_site_sp.get());
   } else {
     error = Status::FromErrorStringWithFormat(
         "invalid breakpoint site ID: %" PRIu64, break_id);
   }
   return error;
+}
+
+bool Process::IsBreakpointSiteEnabled(const lldb::BreakpointSiteSP &site) {
+  assert(site);
+  return site->m_enabled;
+}
+
+bool Process::IsBreakpointSiteEnabled(BreakpointSite *site) {
+  assert(site);
+  return site->m_enabled;
 }
 
 static bool ShouldShowError(Process &process) {
@@ -1732,7 +1741,7 @@ Status Process::EnableSoftwareBreakpoint(BreakpointSite *bp_site) {
   LLDB_LOGF(
       log, "Process::EnableSoftwareBreakpoint (site_id = %d) addr = 0x%" PRIx64,
       bp_site->GetID(), (uint64_t)bp_addr);
-  if (bp_site->IsEnabled()) {
+  if (IsBreakpointSiteEnabled(bp_site)) {
     LLDB_LOGF(
         log,
         "Process::EnableSoftwareBreakpoint (site_id = %d) addr = 0x%" PRIx64
@@ -1776,7 +1785,7 @@ Status Process::EnableSoftwareBreakpoint(BreakpointSite *bp_site) {
                          error) == bp_opcode_size) {
           if (::memcmp(bp_opcode_bytes, verify_bp_opcode_bytes,
                        bp_opcode_size) == 0) {
-            bp_site->SetEnabled(true);
+            SetBreakpointSiteEnabled(*bp_site);
             bp_site->SetType(BreakpointSite::eSoftware);
             LLDB_LOGF(log,
                       "Process::EnableSoftwareBreakpoint (site_id = %d) "
@@ -1818,7 +1827,7 @@ Status Process::DisableSoftwareBreakpoint(BreakpointSite *bp_site) {
   if (bp_site->IsHardware()) {
     error =
         Status::FromErrorString("Breakpoint site is a hardware breakpoint.");
-  } else if (bp_site->IsEnabled()) {
+  } else if (IsBreakpointSiteEnabled(bp_site)) {
     const size_t break_op_size = bp_site->GetByteSize();
     const uint8_t *const break_op = bp_site->GetTrapOpcodeBytes();
     if (break_op_size > 0) {
@@ -1860,7 +1869,7 @@ Status Process::DisableSoftwareBreakpoint(BreakpointSite *bp_site) {
             if (::memcmp(bp_site->GetSavedOpcodeBytes(), verify_opcode,
                          break_op_size) == 0) {
               // SUCCESS
-              bp_site->SetEnabled(false);
+              SetBreakpointSiteEnabled(*bp_site, false);
               LLDB_LOGF(log,
                         "Process::DisableSoftwareBreakpoint (site_id = %d) "
                         "addr = 0x%" PRIx64 " -- SUCCESS",
