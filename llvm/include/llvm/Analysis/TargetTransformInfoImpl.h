@@ -645,11 +645,21 @@ public:
     return TypeSize::get(32, K == TargetTransformInfo::RGK_ScalableVector);
   }
 
+  virtual unsigned getMaxElementWidth() const { return 64; }
+
   virtual unsigned getMinVectorRegisterBitWidth() const { return 128; }
 
   virtual std::optional<unsigned> getMaxVScale() const { return std::nullopt; }
   virtual std::optional<unsigned> getVScaleForTuning() const {
     return std::nullopt;
+  }
+
+  virtual ElementCount getMaxVF(TargetTransformInfo::RegisterKind K,
+                                unsigned GivenType) const {
+    unsigned WidestRegister = getRegisterBitWidth(K).getFixedValue();
+    unsigned GivenVFKnownMin = llvm::bit_floor(WidestRegister / GivenType);
+
+    return ElementCount::get(GivenVFKnownMin, true);
   }
 
   virtual bool
@@ -1213,6 +1223,8 @@ public:
   }
 
   virtual unsigned getMaxNumArgs() const { return UINT_MAX; }
+
+  virtual unsigned getLargestLMUL() const { return 1; }
 
   virtual unsigned getNumBytesToPadGlobalArray(unsigned Size,
                                                Type *ArrayType) const {

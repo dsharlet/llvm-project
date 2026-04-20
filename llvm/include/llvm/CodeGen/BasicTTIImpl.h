@@ -887,6 +887,17 @@ public:
     return TypeSize::getFixed(32);
   }
 
+  ElementCount getMaxVF(TargetTransformInfo::RegisterKind K,
+                        unsigned GivenType) const override {
+    unsigned WidestRegister =
+        static_cast<const T *>(this)->getRegisterBitWidth(K).getFixedValue();
+    unsigned GivenVFKnownMin = llvm::bit_floor(WidestRegister / GivenType);
+
+    return ElementCount::get(GivenVFKnownMin, true);
+  }
+
+  unsigned getMaxElementWidth() const override { return 64; }
+
   std::optional<unsigned> getMaxVScale() const override { return std::nullopt; }
   std::optional<unsigned> getVScaleForTuning() const override {
     return std::nullopt;

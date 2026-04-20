@@ -118,7 +118,9 @@ public:
     /// Vectorize loops using scalable vectors or fixed-width vectors, but favor
     /// scalable vectors when the cost-model is inconclusive. This is the
     /// default when the scalable.enable hint is enabled through a pragma.
-    SK_PreferScalable = 1
+    SK_PreferScalable = 1,
+    /// Disables vectorization with fixed size vectors.
+    SK_ScalableOnly = 2,
   };
 
   LoopVectorizeHints(const Loop *L, bool InterleaveOnlyWhenForced,
@@ -160,6 +162,12 @@ public:
   /// \return true if scalable vectorization has been explicitly disabled.
   bool isScalableVectorizationDisabled() const {
     return (ScalableForceKind)Scalable.Value == SK_FixedWidthOnly;
+  }
+
+  /// \return true if fixed vectorization has been explicitly disabled (and only
+  /// scalable vectorization can be used).
+  bool isFixedVectorizationDisabled() const {
+    return Scalable.Value == SK_ScalableOnly;
   }
 
   /// If hints are provided that force vectorization, use the AlwaysPrint
@@ -475,6 +483,10 @@ public:
 
   /// Returns a list of all known histogram operations in the loop.
   bool hasHistograms() const { return !Histograms.empty(); }
+
+  /// Returns true if TTI says useVLAVectorizer() is enabled for the target.
+  /// TODO: add TTI hooks for same.
+  bool useVLAVectorizer() const;
 
   PredicatedScalarEvolution *getPredicatedScalarEvolution() const {
     return &PSE;

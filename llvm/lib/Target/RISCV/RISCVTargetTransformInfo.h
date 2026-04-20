@@ -92,6 +92,10 @@ public:
   getIntImmCostIntrin(Intrinsic::ID IID, unsigned Idx, const APInt &Imm,
                       Type *Ty, TTI::TargetCostKind CostKind) const override;
 
+  unsigned getMaxElementWidth() const override;
+  ElementCount getMaxVF(TargetTransformInfo::RegisterKind K,
+                        unsigned WidestType) const override;
+
   /// \name EVL Support for predicated vectorization.
   /// Whether the target supports the %evl parameter of VP intrinsic efficiently
   /// in hardware. (see LLVM Language Reference - "Vector Predication
@@ -542,6 +546,9 @@ public:
     }
     llvm_unreachable("unknown register class");
   }
+
+  /// \returns the largest LMUL supported by the target.
+  unsigned getLargestLMUL() const override;
 
   bool isLSRCostLess(const TargetTransformInfo::LSRCost &C1,
                      const TargetTransformInfo::LSRCost &C2) const override;

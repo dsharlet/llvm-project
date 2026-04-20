@@ -827,8 +827,17 @@ TypeSize TargetTransformInfo::getRegisterBitWidth(
   return TTIImpl->getRegisterBitWidth(K);
 }
 
+unsigned TargetTransformInfo::getMaxElementWidth() const {
+  return TTIImpl->getMaxElementWidth();
+}
+
 unsigned TargetTransformInfo::getMinVectorRegisterBitWidth() const {
   return TTIImpl->getMinVectorRegisterBitWidth();
+}
+
+ElementCount TargetTransformInfo::getMaxVF(RegisterKind K,
+                                           unsigned GivenType) const {
+  return TTIImpl->getMaxVF(K, GivenType);
 }
 
 std::optional<unsigned> TargetTransformInfo::getMaxVScale() const {

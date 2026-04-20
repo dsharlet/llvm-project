@@ -1352,8 +1352,14 @@ public:
   /// \return The width of the largest scalar or vector register type.
   LLVM_ABI TypeSize getRegisterBitWidth(RegisterKind K) const;
 
+  /// \return The widest element supported by scalable vectors.
+  unsigned getMaxElementWidth() const;
+
   /// \return The width of the smallest vector register type.
   LLVM_ABI unsigned getMinVectorRegisterBitWidth() const;
+
+  /// \return The maximum VF configured for target.
+  ElementCount getMaxVF(RegisterKind K, unsigned GivenType) const;
 
   /// \return The maximum value of vscale if the target specifies an
   ///  architectural maximum vector length, and std::nullopt otherwise.

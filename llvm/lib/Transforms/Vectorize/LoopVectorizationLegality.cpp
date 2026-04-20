@@ -78,7 +78,9 @@ static cl::opt<LoopVectorizeHints::ScalableForceKind>
             clEnumValN(
                 LoopVectorizeHints::SK_PreferScalable, "on",
                 "Scalable vectorization is available and favored when the "
-                "cost is inconclusive.")));
+                "cost is inconclusive."),
+            clEnumValN(LoopVectorizeHints::SK_ScalableOnly, "only",
+                       "Scalable vectorization is the only option available")));
 
 static cl::opt<bool> EnableHistogramVectorization(
     "enable-histogram-loop-vectorization", cl::init(false), cl::Hidden,
@@ -2087,6 +2089,11 @@ bool LoopVectorizationLegality::canFoldTailByMasking() const {
   LLVM_DEBUG(dbgs() << "LV: can fold tail by masking.\n");
 
   return true;
+}
+
+bool LoopVectorizationLegality::useVLAVectorizer() const {
+  // TODO: fill in with functional info
+  return false;
 }
 
 void LoopVectorizationLegality::prepareToFoldTailByMasking() {

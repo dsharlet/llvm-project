@@ -39,6 +39,22 @@ static cl::opt<unsigned> SLPMaxVF(
         "exclusively by SLP vectorizer."),
     cl::Hidden);
 
+static cl::opt<unsigned> VectorPrimaryLMULMinExp(
+    "vector-primary-lmul-min",
+    cl::desc("Limit the exponent of minimum primary LMUL used by "
+             "autovectorized code."
+             "The default value is 0, it means LMUL=pow(2, 0)=1."
+             "Fractional LMULs are not supported."),
+    cl::init(0), cl::Hidden);
+
+cl::opt<unsigned> VectorPrimaryLMULMaxExp(
+    "vector-primary-lmul-max",
+    cl::desc("Limit the exponent of maximum primary LMUL used by "
+             "autovectorized code."
+             "The default value is 0, it means LMUL=pow(2, 0)=1."
+             "Fractional LMULs are not supported."),
+    cl::init(0), cl::Hidden);
+
 static cl::opt<unsigned>
     RVVMinTripCount("riscv-v-min-trip-count",
                     cl::desc("Set the lower bound of a trip count to decide on "
@@ -330,6 +346,12 @@ RISCVTTIImpl::getIntImmCostIntrin(Intrinsic::ID IID, unsigned Idx,
   return TTI::TCC_Free;
 }
 
+unsigned RISCVTTIImpl::getMaxElementWidth() const {
+  // Returns ELEN. This is the value for which k-scale-factor would be one.
+  // Current EPI implementation plans this to be 64.
+  return ST->hasVInstructionsI64() ? 64 : 32;
+}
+
 bool RISCVTTIImpl::hasActiveVectorLength() const {
   return ST->hasVInstructions();
 }
@@ -338,6 +360,31 @@ TargetTransformInfo::PopcntSupportKind
 RISCVTTIImpl::getPopcntSupport(unsigned TyWidth) const {
   assert(isPowerOf2_32(TyWidth) && "Ty width must be power of 2");
   return ST->hasCPOPLike() ? TTI::PSK_FastHardware : TTI::PSK_Software;
+}
+
+ElementCount RISCVTTIImpl::getMaxVF(TargetTransformInfo::RegisterKind K,
+                                    unsigned GivenType) const {
+  // check for SEW <= ELEN in the base ISA
+  // VLEN=32 support is incomplete.
+  if (GivenType > getMaxElementWidth() ||
+      (ST->getRealMinVLen() < RISCV::RVVBitsPerBlock))
+    return ElementCount::get(0, false);
+
+  // Smallest SEW supported = 8. For 1 bit wide Type, clip to 8 bit to get a
+  // valid range of VFs.
+  GivenType = std::max<unsigned>(8, GivenType);
+
+  unsigned LMULMin = 1 << std::min<unsigned>(VectorPrimaryLMULMinExp, 3);
+  unsigned LMULMax = 1 << std::min<unsigned>(VectorPrimaryLMULMaxExp, 3);
+
+  // Enable lmul8 on x280/x390 by default.
+  if (!VectorPrimaryLMULMaxExp.getNumOccurrences())
+    LMULMax = getLargestLMUL();
+
+  assert(LMULMax >= LMULMin && "LMULMax must be greater than or equal to LMUL");
+
+  return ElementCount::getScalable(LMULMax * RISCV::RVVBitsPerBlock /
+                                   GivenType);
 }
 
 InstructionCost RISCVTTIImpl::getPartialReductionCost(
@@ -3349,6 +3396,15 @@ bool RISCVTTIImpl::isLSRCostLess(const TargetTransformInfo::LSRCost &C1,
          std::tie(C2.Insns, C2NumRegs, C2.AddRecCost,
                   C2.NumIVMuls, C2.NumBaseAdds,
                   C2.ScaleCost, C2.ImmCost, C2.SetupCost);
+}
+
+unsigned RISCVTTIImpl::getLargestLMUL() const {
+  if (ST->getProcFamily() == RISCVSubtarget::SiFive7)
+    return 8;
+  else if (ST->isSiFiveCPU())
+    return 4;
+  else
+    return 1;
 }
 
 bool RISCVTTIImpl::isLegalMaskedExpandLoad(Type *DataTy,

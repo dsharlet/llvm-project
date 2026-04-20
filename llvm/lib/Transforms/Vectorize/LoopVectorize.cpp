@@ -225,6 +225,12 @@ static cl::opt<TailFoldingPolicyTy> TailFoldingPolicy(
                    "always tail-fold, don't attempt vectorization if "
                    "tail-folding fails.")));
 
+static cl::opt<unsigned> VectorRegisterWidthFactor(
+    "vector-register-width-factor", cl::init(1), cl::Hidden,
+    cl::desc("On targets that support variable width for vector registers, "
+             "value by which the vector register width is a multiple of "
+             "minimum vector register width."));
+
 static cl::opt<TailFoldingStyle> ForceTailFoldingStyle(
     "force-tail-folding-style", cl::desc("Force the tail folding style"),
     cl::init(TailFoldingStyle::None),
@@ -387,6 +393,11 @@ cl::opt<bool> llvm::EnableLoopInterleaving(
 cl::opt<bool> llvm::EnableLoopVectorization(
     "vectorize-loops", cl::init(true), cl::Hidden,
     cl::desc("Run the Loop vectorization passes"));
+
+static cl::opt<bool> VectorizeLoopsWithKnownDepDist(
+    "vectorize-with-known-depdist", cl::init(true), cl::Hidden,
+    cl::desc("Enable vectorization of loops that have a known dependence "
+             "distance."));
 
 static cl::opt<cl::boolOrDefault> ForceSafeDivisor(
     "force-widen-divrem-via-safe-divisor", cl::Hidden,
@@ -930,6 +941,11 @@ public:
   bool useOrderedReductions(const RecurrenceDescriptor &RdxDesc) const {
     return !Hints->allowReordering() && RdxDesc.isOrdered();
   }
+
+  /// \return Returns information about the register usages of the loop for the
+  /// given vectorization factors.
+  SmallVector<VPRegisterUsage, 8>
+  calculateRegisterUsage(ArrayRef<ElementCount> VFs);
 
   /// \returns The smallest bitwidth each instruction can be represented with.
   /// The vector equivalents of these instructions should be truncated to this
@@ -3306,6 +3322,11 @@ LoopVectorizationCostModel::getMaxLegalScalableVF(unsigned MaxSafeElements) {
   // Limit MaxScalableVF by the maximum safe dependence distance.
   MaxScalableVF = ElementCount::getScalable(MaxSafeElements / *MaxVScale);
 
+  // Later this value will be compared and clamped with the MaxVF we
+  // obtained for the target as a safe upper bound.
+  if (Legal->useVLAVectorizer() && !MaxScalableVF)
+    MaxScalableVF = ElementCount::getScalable(MaxSafeElements);
+
   if (!MaxScalableVF)
     reportVectorizationInfo(
         "Max legal vector width too small, scalable vectorization "
@@ -3321,6 +3342,141 @@ FixedScalableVFPair LoopVectorizationCostModel::computeFeasibleMaxVF(
   MinBWs = computeMinimumValueSizes(TheLoop->getBlocks(), *DB, &TTI);
   unsigned SmallestType, WidestType;
   std::tie(SmallestType, WidestType) = getSmallestAndWidestTypes();
+
+  if (Hints->isFixedVectorizationDisabled()) {
+    unsigned MaxSafeVectorWidthInBits = Legal->getMaxSafeVectorWidthInBits();
+    if (!Legal->isSafeForAnyVectorWidth())
+      MaxSafeElements = MaxSafeVectorWidthInBits / WidestType;
+
+    // Beyond this point two scenarios are handled. If UserVF isn't specified
+    // then a suitable VF is chosen. If UserVF is specified and there are
+    // dependencies, check if it's legal. However, if a UserVF is specified and
+    // there are no dependencies, then there's nothing to do.
+    if (UserVF.isNonZero() && Legal->isSafeForAnyVectorWidth())
+      return UserVF;
+    else if (!Legal->isSafeForAnyVectorWidth() && UserVF.isZero() &&
+             !VectorizeLoopsWithKnownDepDist) {
+      reportVectorizationFailure("LV: Scalable vectorization for loops with "
+                                 "known dependence distance is disabled.",
+                                 "Scalable vectorization is disabled for loops "
+                                 "with known dependence distance.",
+                                 "ScalableVFUnfeasible", ORE, TheLoop);
+      return FixedScalableVFPair::getNone();
+    }
+
+    if (!canVectorizeReductions(/* unused */ ElementCount::getScalable(1))) {
+      reportVectorizationFailure(
+          "LV: Scalable vectorization not supported for the reduction "
+          "operations found in this loop.",
+          "Scalable vectorization not supported for the reduction operations "
+          "found in this loop.",
+          "ScalableVFUnfeasible", ORE, TheLoop);
+      return FixedScalableVFPair::getNone();
+    }
+
+    TargetTransformInfo::RegisterKind K =
+        TargetTransformInfo::RGK_ScalableVector;
+    unsigned WidestRegister = TTI.getRegisterBitWidth(K).getKnownMinValue() *
+                              VectorRegisterWidthFactor;
+
+    // Get the maximum VF as clamped by the target.
+    ElementCount MaxVF = TTI.getMaxVF(K, WidestType);
+
+    if (MaxVF.isZero()) {
+      LLVM_DEBUG(dbgs() << "LV: No feasible VF exists\n");
+      return FixedScalableVFPair::getNone();
+    }
+
+    auto MaxSafeScalableVF =
+        getMaxLegalScalableVF(MaxSafeVectorWidthInBits / WidestType);
+
+    if (MaxSafeScalableVF.isZero()) {
+      LLVM_DEBUG(dbgs() << "LV: No feasible VF exists\n");
+      return FixedScalableVFPair::getNone();
+    }
+
+    // If the user vectorization factor is legally unsafe, clamp it to a safe
+    // value. Otherwise, return as is.
+    if (UserVF.isNonZero()) {
+      LLVM_DEBUG(dbgs() << "LV: The max safe VF is: " << MaxSafeScalableVF
+                        << ".\n");
+      if (ElementCount::isKnownLE(UserVF, MaxSafeScalableVF))
+        return UserVF;
+
+      LLVM_DEBUG(dbgs() << "LV: User VF=" << UserVF
+                        << " is unsafe, clamping to max safe VF="
+                        << MaxSafeScalableVF << ".\n");
+      ORE->emit([&]() {
+        return OptimizationRemarkAnalysis(DEBUG_TYPE, "VectorizationFactor",
+                                          TheLoop->getStartLoc(),
+                                          TheLoop->getHeader())
+               << "User-specified vectorization factor "
+               << ore::NV("UserVectorizationFactor", UserVF)
+               << " is unsafe, clamping to maximum safe vectorization factor "
+               << ore::NV("VectorizationFactor", MaxSafeScalableVF);
+      });
+      return MaxSafeScalableVF;
+    }
+
+    // Use MaxSafeScalableVF if it has been clamped and is nonZero in MaxVF.
+    auto CurVF = std::min(MaxVF.getKnownMinValue(),
+                          MaxSafeScalableVF.getKnownMinValue());
+    MaxVF = ElementCount::getScalable(CurVF);
+
+    WidestRegister = std::min(WidestRegister, MaxSafeVectorWidthInBits);
+    unsigned MaxVFKnownMin = MaxVF.getKnownMinValue();
+
+    // Ensure MaxVF is a power of 2; the dependence distance bound may not be.
+    // Note that both WidestRegister and WidestType may not be a powers of 2.
+    auto MaxVectorSize =
+        ElementCount::getFixed(llvm::bit_floor(WidestRegister / WidestType));
+
+    LLVM_DEBUG(dbgs() << "LV: The Smallest and Widest types: " << SmallestType
+                      << " / " << WidestType << " bits.\n");
+    LLVM_DEBUG(dbgs() << "LV: The Widest register safe to use is: "
+                      << WidestRegister << " bits.\n");
+
+    if (MaxVectorSize.getFixedValue() == 0) {
+      LLVM_DEBUG(dbgs() << "LV: The target has no vector registers.\n");
+      return ElementCount::getFixed(1);
+    }
+
+    // Select best MaxVF that does not running out of registers
+    SmallVector<ElementCount, 8> VFs;
+    for (unsigned VS = 1; VS <= MaxVFKnownMin; VS *= 2)
+      VFs.push_back(ElementCount::getScalable(VS));
+
+    // For each VF calculate its register usage.
+    auto RUs = calculateRegisterUsage(VFs);
+    // FIXME: calculateRegisterUsage takes decisions because it calls
+    // collectUniformsAndScalars.
+    invalidateCostModelingDecisions();
+    // Select the largest VF which doesn't use more registers than available.
+    for (int I = RUs.size() - 1; I >= 0; --I) {
+      const auto &MLU = RUs[I].MaxLocalUsers;
+      if (llvm::all_of(MLU, [&](decltype(MLU.front()) &LU) {
+            return LU.second <= TTI.getNumberOfRegisters(LU.first);
+          })) {
+        MaxVF = VFs[I];
+        break;
+      }
+    }
+    if (ElementCount MinVF =
+            TTI.getMinimumVF(SmallestType, /* Scalable */ true)) {
+      if (ElementCount::isKnownLT(MaxVF, MinVF)) {
+        LLVM_DEBUG(dbgs() << "LV: Overriding calculated MaxVF(" << MaxVF
+                          << ") with target's minimum: " << MinVF << '\n');
+        MaxVF = MinVF;
+      }
+    }
+    // Invalidate any widening decisions we might have made, in case the loop
+    // requires prediction (decided later), but we have already made some
+    // load/store widening decisions.
+    invalidateCostModelingDecisions();
+    LLVM_DEBUG(dbgs() << "LV: calculated MaxVF(" << MaxVF
+                      << "), MaxVFUpperBound(" << MaxVF << ")\n");
+    return MaxVF;
+  }
 
   // Get the maximum safe dependence distance in bits computed by LAA.
   // It is computed by MaxVF * sizeOf(type) * 8, where type is taken from
@@ -3472,8 +3628,17 @@ LoopVectorizationCostModel::computeMaxVF(ElementCount UserVF, unsigned UserIC) {
   }
 
   switch (EpilogueLoweringStatus) {
-  case CM_EpilogueAllowed:
-    return computeFeasibleMaxVF(MaxTC, UserVF, UserIC, false);
+  case CM_EpilogueAllowed: {
+    FixedScalableVFPair MaxVF =
+        computeFeasibleMaxVF(MaxTC, UserVF, UserIC, false);
+    if (Hints->isFixedVectorizationDisabled() && !MaxVF)
+      reportVectorizationFailure(
+          "Cannot vectorize operations on unsupported scalable vector type",
+          "Cannot vectorize operations on unsupported scalable vector type",
+          "UnsupportedScalableVectorType", ORE, TheLoop);
+
+    return MaxVF;
+  }
   case CM_EpilogueNotAllowedFoldTail:
     [[fallthrough]];
   case CM_EpilogueNotNeededFoldTail:
@@ -4778,6 +4943,14 @@ LoopVectorizationPlanner::selectInterleaveCount(VPlan &Plan, ElementCount VF,
 
   LLVM_DEBUG(dbgs() << "LV: Not Interleaving.\n");
   return 1;
+}
+
+SmallVector<VPRegisterUsage, 8>
+LoopVectorizationCostModel::calculateRegisterUsage(ArrayRef<ElementCount> VFs) {
+  // TODO: add functional features here.
+  SmallVector<VPRegisterUsage, 8> RUs(VFs.size());
+
+  return RUs;
 }
 
 bool LoopVectorizationCostModel::useEmulatedMaskMemRefHack(Instruction *I,

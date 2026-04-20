@@ -166,6 +166,15 @@ public:
   /// initializeProperties().
   RISCVProcFamilyEnum getProcFamily() const { return RISCVProcFamily; }
 
+  bool isSiFiveCPU() const {
+    switch (RISCVProcFamily) {
+    case RISCVProcFamilyEnum::SiFive7:
+      return true;
+    default:
+      return false;
+    }
+  }
+
   RISCVVRGatherCostModelEnum getVRGatherCostModel() const { return RISCVVRGatherCostModel; }
 
 #define GET_SUBTARGETINFO_MACRO(ATTRIBUTE, DEFAULT, GETTER) \
